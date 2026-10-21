@@ -1,0 +1,351 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.pnk.agent_name }}-{{ .Release.Name }}-scripts
+  namespace: {{ .Release.Namespace }}
+data:
+{{- if .Values.keda.scaledtype | eq "object" }}
+  azdo.sh: |-
+    #!/usr/bin/env bash
+
+    set -Eeuo pipefail
+
+    SCRIPT_NAME="${SCRIPT_NAME:-azdo}"
+
+    source /azp/common.sh
+
+    ##########################################
+    # Config
+    ##########################################
+
+    API_VERSION="7.1"
+
+    AGENT_FILE="/azp/.agent"
+
+    ##########################################
+    # Environment
+    ##########################################
+
+    require_env() {
+
+        : "${AZP_URL:?AZP_URL not defined}"
+        : "${AZP_TOKEN:?AZP_TOKEN not defined}"
+        : "${AZP_POOL:?AZP_POOL not defined}"
+
+    }
+
+    ##########################################
+    # Retry helper
+    ##########################################
+
+    retry() {
+
+        local attempts="$1"
+        shift
+
+        local n=1
+
+        until "$@"
+        do
+
+            if [[ $n -ge$attempts ]]; then
+                return 1
+            fi
+
+            log "Retry ${n}/${attempts}"
+
+            n=$((n+1))
+
+            sleep 5
+
+        done
+
+    }
+
+    ##########################################
+    # Registration
+    ##########################################
+
+    register_agent() {
+
+        require_env
+
+        set_state REGISTERING
+
+        if ! retry 5 register_agent_once
+        then
+            log "Failed to register the agent."
+
+            set_state FAILED
+
+            return 1
+        fi
+
+        set_state READY
+
+        log "Agent registered."
+
+    }
+
+    register_agent_once() {
+
+        rm -f .agent .credentials .credentials_rsaparams || true
+
+        timeout 300 ./config.sh \
+            --unattended \
+            --replace \
+            --acceptTeeEula \
+            --url "${AZP_URL}" \
+            --auth pat \
+            --token "${AZP_TOKEN}" \
+            --pool "${AZP_POOL}" \
+            --agent "${AZP_AGENT_NAME:-$(hostname)}" \
+            --work /azp/_work
+
+    }
+
+    ##########################################
+    # Registered?
+    ##########################################
+
+    is_registered() {
+
+        [[ -f "${AGENT_FILE}" ]]
+
+    }
+
+    ##########################################
+    # Agent metadata
+    ##########################################
+
+    get_agent_id() {
+
+        [[ -f "${AGENT_FILE}" ]] || return 1
+
+        grep -o '"agentId":[0-9]*' "${AGENT_FILE}" \
+            | cut -d: -f2
+
+    }
+
+    get_pool_id() {
+
+        [[ -f "${AGENT_FILE}" ]] || return 1
+
+        grep -o '"poolId":[0-9]*' "${AGENT_FILE}" \
+            | cut -d: -f2
+
+    }
+
+    ##########################################
+    # REST API
+    ##########################################
+
+    patch_agent() {
+
+        local payload="$1"
+
+        local agent_id
+        local pool_id
+
+        agent_id="$(get_agent_id)"
+        pool_id="$(get_pool_id)"
+
+        [[ -z "${agent_id}" ]] && return 1
+        [[ -z "${pool_id}" ]] && return 1
+
+        curl \
+            --silent \
+            --show-error \
+            --fail \
+            --connect-timeout 10 \
+            --max-time 30 \
+            -u ":${AZP_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -X PATCH \
+            -d "${payload}" \
+            "${AZP_URL}/_apis/distributedtask/pools/${pool_id}/agents/${agent_id}?api-version=${API_VERSION}" \
+            >/dev/null
+
+    }
+
+    ##########################################
+    # Enable / Disable
+    ##########################################
+
+    enable_agent() {
+
+        log "Enabling agent"
+
+        retry 3 patch_agent '{"enabled":true}' || true
+
+    }
+
+    disable_agent() {
+
+        log "Disabling agent"
+
+        retry 5 patch_agent '{"enabled":false}' || true
+
+    }
+
+    ##########################################
+    # Remove
+    ##########################################
+
+    remove_agent() {
+
+        if ! is_registered
+        then
+
+            log "No registration found."
+
+            return 0
+
+        fi
+
+        log "Removing agent..."
+
+        if ! retry 3 remove_agent_once
+        then
+            log "Failed to remove the agent."
+
+            return 0
+        fi
+
+        log "Agent removed."
+
+    }
+
+    remove_agent_once() {
+
+        timeout 180 ./config.sh remove \
+            --unattended \
+            --auth pat \
+            --token "${AZP_TOKEN}"
+
+    }
+
+    ##########################################
+    # Drain helper
+    ##########################################
+
+    drain_agent() {
+
+        set_state DRAINING
+
+        disable_agent
+
+    }
+
+    ##########################################
+    # Full shutdown
+    ##########################################
+
+    shutdown_agent() {
+
+        log "Shutdown started"
+
+        drain_agent
+
+        wait_fix_permissions || true
+
+        remove_agent || true
+
+        #
+        # ALWAYS notify the Docker sidecar,
+        # even if Azure DevOps fails.
+        #
+        agent_finished
+
+        sync
+
+        sleep 2
+
+        set_state EXITING
+
+    }
+
+  common.sh: |-
+    #!/usr/bin/env bash
+
+    set -Eeuo pipefail
+
+    ##########################################
+    # Paths
+    ##########################################
+
+    AZP_HOME="/azp"
+
+    STATE_FILE="${AZP_HOME}/state"
+
+    PERMISSIONS_DIR="${AZP_HOME}/permissions"
+
+    FIX_PERMISSIONS="${PERMISSIONS_DIR}/fix-permissions"
+
+    TERMINATE_REQUESTED="${PERMISSIONS_DIR}/terminate-requested"
+
+    DOCKER_READY="${PERMISSIONS_DIR}/docker-ready"
+
+    AGENT_DONE="${PERMISSIONS_DIR}/agent-done"
+
+    ##########################################
+    # Global State
+    ##########################################
+
+    CURRENT_STATE=""
+
+    ##########################################
+    # Logging
+    ##########################################
+
+    log() {
+
+        echo "[$(date '+%F %T')] [$SCRIPT_NAME]$*"
+
+    }
+
+    ##########################################
+    # State
+    ##########################################
+
+    set_state() {
+
+        CURRENT_STATE="$1"
+
+        echo "$1" > "${STATE_FILE}"
+
+        log "STATE -> $1"
+
+    }
+
+    set_state_once() {
+
+        [[ "${CURRENT_STATE}" == "$1" ]] && return
+
+        set_state "$1"
+
+    }
+
+    get_state() {
+
+        [[ -f "${STATE_FILE}" ]] || return 1
+
+        < "${STATE_FILE}" cat
+
+    }
+
+    ##########################################
+    # Docker
+    ##########################################
+
+    wait_docker() {
+
+        log "Waiting for Docker..."
+
+        local retries=120
+
+        until [[ -f "${DOCKER_READY}" ]] && docker info >/dev/null 2>&1
+        do
+
+            retries=$((ret
