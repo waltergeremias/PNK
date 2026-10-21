@@ -1,0 +1,63 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.pnk.agent_name }}-{{ .Release.Name }}-cleaning-cfg
+  namespace: {{ .Release.Namespace }}
+data:
+  cleaning-task.sh: |-
+    #!/bin/bash
+
+
+    # Set your Azure DevOps organization URL and PAT token
+    ORG_URL="{{ .Values.pnk.organization_name }}"           
+    PAT_TOKEN="{{ .Values.pnk.pat }}"
+    PAT_TOKEN=$(printf "%s"":$PAT_TOKEN" | base64 -w 0)
+
+    # Set the agent pool ID and API version
+
+    POOL_NAME="{{ .Values.pnk.azure_pool }}"
+    API_VERSION="7.1-preview.1"
+    POOL_INFO=$(curl -s -H "Authorization: Basic $PAT_TOKEN" "${ORG_URL}/_apis/distributedtask/pools?api-version=${API_VERSION}&poolName=${POOL_NAME}")
+    # Get a list of all agents in the pool
+    POOL_ID=$(echo $POOL_INFO | jq -r '.value[].id')
+    DATE_NOW=$(date -u '+%Y-%m-%d %H:%M:%S')
+    echo "Pool ID: $POOL_ID"
+    AGENTS=$(curl -s -H "Authorization: Basic $PAT_TOKEN" "${ORG_URL}/_apis/distributedtask/pools/${POOL_ID}/agents?api-version=${API_VERSION}")
+    OFFLINE_THRESHOLD_MIN=15
+
+    AGENTS=$(curl -s \
+      -H "Authorization: Basic $PAT_TOKEN" \
+      "${ORG_URL}/_apis/distributedtask/pools/${POOL_ID}/agents?includeCapabilities=false&api-version=${API_VERSION}")
+
+    for AGENT in $(echo "$AGENTS" | jq -r '.value[].id'); do
+
+      STATUS=$(echo "$AGENTS" | jq -r --argjson id "$AGENT" \
+        '.value[] | select(.id == $id) | .status')
+
+      AGENT_NAME=$(echo "$AGENTS" | jq -r --argjson id "$AGENT" \
+        '.value[] | select(.id == $id) | .name')
+
+      AGENT_CHG=$(echo "$AGENTS" | jq -r --argjson id "$AGENT" \
+        '.value[] | select(.id == $id) | .statusChangedOn' \
+        | cut -c -19 | sed 's/T/ /g')
+
+      # Si no hay fecha válida, asumir que lleva mucho tiempo offline
+      if [ -z "$AGENT_CHG" ] || [ "$AGENT_CHG" == "null" ]; then
+        TIME_DIF=99999
+      else
+        NOW_TS=$(date -d "$DATE_NOW" '+%s')
+        CHG_TS=$(date -d "$AGENT_CHG" '+%s' 2>/dev/null || echo "0")
+        TIME_DIF=$(( (NOW_TS - CHG_TS) / 60 ))
+      fi
+
+      if [ "$STATUS" == "offline" ] && [ "$TIME_DIF" -gt "$OFFLINE_THRESHOLD_MIN" ]; then
+        echo "Deleting agent ID=$AGENT Name=$AGENT_NAME offline since=$AGENT_CHG (${TIME_DIF}min ago)"
+        curl -s -X DELETE \
+          -H "Authorization: Basic $PAT_TOKEN" \
+          "${ORG_URL}/_apis/distributedtask/pools/${POOL_ID}/agents/${AGENT}?api-version=${API_VERSION}"
+      else
+        echo "OK agent ID=$AGENT Name=$AGENT_NAME Status=$STATUS offline_min=$TIME_DIF"
+      fi
+
+    done
