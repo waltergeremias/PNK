@@ -1,0 +1,11 @@
+{{- if .Values.pnk.quota_enabled }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: limit-pods-{{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  hard:
+    pods: {{ .Values.keda.quota_maxReplicaCount | quote }}
+
+{{- end }}
