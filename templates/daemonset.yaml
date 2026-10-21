@@ -1,0 +1,64 @@
+{{- if .Values.pnk.pre_pull_image_daemon }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: pre-pull-imagen-{{ .Release.Name }}
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: pre-pull-imagen-{{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        name: pre-pull-imagen-{{ .Release.Name }}
+    spec:
+      tolerations:
+        - key: scheduling.cast.ai/spot
+          operator: Exists
+        - key: provisioning.cast.ai/temporary
+          operator: Equal
+          value: resuming
+          effect: NoSchedule
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+      initContainers:
+        - name: pre-pull-pnk
+          image: {{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag | default .Chart.AppVersion }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "echo 'Imagen lista'"]
+          resources:
+            requests:
+              memory: "10Mi"
+              cpu: "10m"
+            limits:
+              memory: "50Mi"
+              cpu: "50m"
+        - name: pre-pull-docker
+          image: {{ .Values.docker.image.repository }}:{{ .Values.docker.image.tag | default .Chart.AppVersion }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "echo 'Imagen lista'"]
+          resources:
+            requests:
+              memory: "10Mi"
+              cpu: "10m"
+            limits:
+              memory: "50Mi"
+              cpu: "50m"
+      containers:
+        - name: pause
+          image: pause:3.9       
+          resources:
+            requests:
+              memory: "1Mi"
+              cpu: "1m"
+            limits:
+              memory: "10Mi"
+              cpu: "10m"
+      imagePullSecrets:
+        - name: mi-acr-{{ .Release.Name }}
+{{- end }}        
