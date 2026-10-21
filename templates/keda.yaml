@@ -1,0 +1,251 @@
+{{- if .Values.keda.scaledtype | eq "object" }}
+#### SCALEDOBJECT ###
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ .Values.pnk.agent_name }}-{{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  scaleTargetRef:
+    name: {{ .Values.pnk.agent_name }}-{{ .Release.Name }}
+  minReplicaCount: {{ .Values.keda.minReplicaCount }}
+  maxReplicaCount: {{ .Values.keda.maxReplicaCount }}
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod:  {{ .Values.keda.cooldownPeriod }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: {{ .Values.keda.scaleUpStabilizationWindowSeconds | default "0" }}
+          policies:
+            - type: {{ .Values.keda.scaleUpStabilizationWindowSecondsPolicyType | default "Pods" }}
+              value: {{ .Values.keda.scaleUpStabilizationWindowSecondsPolicyValue | default "50" }}
+              periodSeconds: {{ .Values.keda.scaleUpStabilizationWindowSecondsPeriod | default "30" }}
+            - type: {{ .Values.keda.scaleUpStabilizationWindowSecondsPolicyType2 | default "Percent" }}
+              value: {{ .Values.keda.scaleUpStabilizationWindowSecondsPolicyValue2 | default "400" }}
+              periodSeconds: {{ .Values.keda.scaleUpStabilizationWindowSecondsPeriod2 | default "30" }}
+          selectPolicy: Max
+        scaleDown:
+          stabilizationWindowSeconds: {{ .Values.keda.scaleDownStabilizationWindowSeconds | default "180" }}
+          policies:
+            - type: {{ .Values.keda.scaleDownStabilizationWindowSecondsPolicyType | default "Percent" }}
+              value: {{ .Values.keda.scaleDownStabilizationWindowSecondsPolicyValue | default "50" }}
+              periodSeconds: {{ .Values.keda.scaleDownStabilizationWindowSecondsPeriod | default "120" }}
+  triggers:
+  - type: azure-pipelines
+    metadata:
+      poolID: {{ .Values.pnk.azure_pool_id | quote }}
+      targetPipelinesQueueLength: {{ .Values.keda.targetPipelinesQueueLength | quote }}
+      activationTargetPipelinesQueueLength: {{ .Values.keda.activationTargetPipelinesQueueLength | quote }}
+      requireAllDemandsSatisfied: "true"
+    authenticationRef:
+      name: azdo-auth-trigger-{{ .Release.Name }}
+  {{- range .Values.keda.cronTriggers }}
+  - type: cron
+    metadata:
+      timezone: {{ .timezone | quote }}
+      start: {{ .start | quote }}
+      end: {{ .end | quote }}
+      desiredReplicas: {{ .desiredReplicas | quote }}
+  {{- end }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: azdo-auth-trigger-{{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  secretTargetRef:
+    - parameter: personalAccessToken
+      name: keda-azdo-secret-{{ .Release.Name }}
+      key: personalAccessToken
+    - parameter: organizationURL
+      name: keda-azdo-secret-{{ .Release.Name }}
+      key: organizationURL
+
+{{- end }}
+
+
+
+{{- if .Values.keda.scaledtype | eq "job" }}
+#### SCALEDJOB ###
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: {{ .Values.pnk.agent_name }}-{{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  jobTargetRef:
+    ttlSecondsAfterFinished: {{ .Values.keda.ttlSecondsAfterFinished }}
+    backoffLimit: {{ .Values.keda.backoffLimit }}
+    template:
+      spec:
+        {{- if eq .Values.keda.dnspolicy.active "true" }}
+        dnsConfig:
+          options:
+            - name: ndots
+              value: {{ .Values.keda.dnspolicy.ndots | quote }}
+            - name: single-request-reopen
+              value: ""
+            - name: timeout
+              value: {{ .Values.keda.dnspolicy.timeout | quote }}
+            - name: attempts
+              value: {{ .Values.keda.dnspolicy.attempts | quote }}
+        {{- end }}
+        restartPolicy: Never
+        terminationGracePeriodSeconds: {{ .Values.pnk.terminationGracePeriodSeconds }}
+        priorityClassName: {{ .Release.Name }}-high
+        securityContext:
+          fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
+
+        volumes:
+          - name: docker-socket
+            emptyDir:
+              sizeLimit: {{ .Values.volumes.docker_socket_size_limit | default "1Mi" }}
+          - name: docker-storage
+            emptyDir:
+              sizeLimit: {{ .Values.volumes.storage_sizelimit }}
+          - name: agent-work
+            emptyDir:
+              medium: Memory
+              sizeLimit: {{ .Values.volumes.agent_work_size_limit | default "6Gi" }}
+          - name: agent-externals
+            emptyDir:
+              sizeLimit: {{ .Values.volumes.agent_externals_size_limit | default "4Gi" }}
+          - name: kube-config-shared
+            emptyDir:
+              sizeLimit: {{ .Values.volumes.kube_config_shared_size_limit | default "500Mi" }}
+          - hostPath:
+              path: /usr/share/zoneinfo/Europe/Madrid
+              type: File
+            name: tz-mad
+          - name: scripts-pnk
+            configMap:
+              name: {{ .Values.pnk.agent_name }}-{{ .Release.Name }}-scripts
+              defaultMode: 0755
+
+        containers:
+          - name: agent
+            image: {{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag | default .Chart.AppVersion }}
+            imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+            lifecycle:
+              preStop:
+                exec:
+                  command: ["/bin/bash", "/azp/stop_agent.sh"]
+            securityContext:
+              runAsUser: 1000
+              runAsNonRoot: true
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
+            env:
+              - name: TZ
+                value: {{ .Values.pnk.timezone | quote }}
+              - name: KUBECONFIG
+                value: /home/vsts_azpcontainer/.kube/config
+              - name: DOCKER_HOST
+                value: "unix:///var/run/docker.sock"
+              - name: AZP_URL
+                value: {{ .Values.pnk.organization_name | quote }}
+              - name: AZP_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: keda-azdo-secret-{{ .Release.Name }}
+                    key: personalAccessToken
+              - name: AZP_POOL
+                value: {{ .Values.pnk.azure_pool | quote }}
+              - name: AZP_AGENT_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+            command: ["sh", "-c", "/azp/start_agent.sh"]
+            volumeMounts:
+              - name: docker-socket
+                mountPath: /var/run
+              - name: agent-work
+                mountPath: /azp/_work
+              - name: agent-externals
+                mountPath: /azp/externals
+              - mountPath: /etc/localtime
+                name: tz-quito
+                readOnly: true
+              - name: kube-config-shared
+                mountPath: /home/vsts_azpcontainer/.kube
+              - name: scripts-pnk
+                mountPath: /azp/start_agent.sh
+                subPath: start_agent.sh
+              - name: scripts-pnk
+                mountPath: /azp/stop_agent.sh
+                subPath: stop_agent.sh
+            resources:
+              requests:
+                memory: {{ .Values.agent.request_memory | quote }}
+                cpu: {{ .Values.agent.cpu | quote }}
+              limits:
+                memory: {{ .Values.agent.memory_limit | quote }}
+                cpu: {{ .Values.agent.cpu_limit | quote }}
+
+          - name: docker-daemon
+            image: {{ .Values.docker.image.repository }}:{{ .Values.docker.image.tag }}
+            imagePullPolicy: {{ .Values.docker.image.pullPolicy }}
+            lifecycle:
+              preStop:
+                exec:
+                  command: ["sh", "-c", "/azp/stop_docker.sh"]
+            securityContext:
+              privileged: true
+            command: ["sh", "-c", "/azp/start_docker.sh"]
+            volumeMounts:
+              - name: docker-socket
+                mountPath: /var/run
+              - name: docker-storage
+                mountPath: /var/lib/docker
+              - name: agent-work
+                mountPath: /azp/_work
+              - name: agent-externals
+                mountPath: /azp/externals
+              - mountPath: /etc/localtime
+                name: tz-mad
+                readOnly: true
+              - name: kube-config-shared
+                mountPath: /home/vsts_azpcontainer/.kube
+              - name: scripts-pnk
+                mountPath: /azp/start_docker.sh
+                subPath: start_docker.sh
+              - name: scripts-pnk
+                mountPath: /azp/stop_docker.sh
+                subPath: stop_docker.sh
+            resources:
+              requests:
+                memory: {{ .Values.docker.request_memory | quote }}
+                cpu: {{ .Values.docker.cpu | quote }}
+                ephemeral-storage: {{ .Values.docker.storage_request | quote }}
+              limits:
+                memory: {{ .Values.docker.memory_limit | quote }}
+                cpu: {{ .Values.docker.cpu_limit | quote }}
+                ephemeral-storage: {{ .Values.docker.storage_limit | quote }}
+
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  successfulJobsHistoryLimit: {{ .Values.keda.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.keda.failedJobsHistoryLimit }}
+  minReplicaCount: {{ .Values.keda.minReplicaCount }}
+  maxReplicaCount: {{ .Values.keda.maxReplicaCount }}
+  scalingStrategy:
+    strategy: {{ .Values.keda.scalingStrategy }}
+  triggers:
+    - type: azure-pipelines
+      authenticationRef:
+        name: azdo-auth-trigger-{{ .Release.Name }}
+      metadata:
+        poolID: {{ .Values.pnk.azure_pool_id | quote }}
+        targetPipelinesQueueLength: {{ .Values.keda.targetPipelinesQueueLength | quote }}
+        activationTargetPipelinesQueueLength: "1"
+        organizationURLFromEnv: "AZP_URL"
+        personalAccessTokenFromEnv: "AZP_TOKEN"
+        {{- if eq .Values.keda.parent "true" }}
+        parent: {{ .Values.pnk.agent_name }}-{{ .Release.Name }}
+        {{- end }}
+
+{{- end }}
