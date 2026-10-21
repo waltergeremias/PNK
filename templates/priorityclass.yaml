@@ -1,0 +1,8 @@
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ .Release.Name }}-high
+value: 1000000000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Azure DevOps agents pnk - no evictar"
