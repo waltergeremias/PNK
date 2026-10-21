@@ -1,0 +1,113 @@
+#PNK
+pnk:
+  agent_name: "azdo-agents"
+  organization_name: "https://dev.azure.com/your_organization"
+  azure_pool_id: "POOL_ID_AGENTE"
+  azure_pool: "POOL_NAME"
+  pat: "PAT"
+  timezone: "Europe/Madrid"
+  cronjob_image: curl:7.80.0-alpine-1
+  acr_name: "pnk-agents"
+  acr_pass: "PASSWORD_ACR"
+  pre_pull_image_daemon: true
+  terminationGracePeriodSeconds: 900
+  quota_enabled: false
+  
+#################################
+########## Job Values ###########
+#################################
+  # If type 'job' is used, the agent starts with --once and stops when the job finishes
+  # The stop script does nothing in this case, but it is kept in case we switch to type 'object' without modifying the scripts
+  # Additionally, the agent registers/unregisters dynamically to avoid leaving orphan agents in AzDO
+  # The periodic cleanup script removes agents that have been offline for more than 15 minutes
+##Container AZDO Agent 
+
+agent:
+  image:
+    repository: your_registry/pnk
+    # Image pull policy - IfNotPresent, Always, or Never
+    pullPolicy: IfNotPresent
+    tag: "1.5.4"
+  replicaCount: "1"
+  cpu: "1"
+  cpu_limit: "2"
+  cores: "1"
+  request_memory: "1Gi"
+  memory_limit: "10Gi"
+
+##Container dind
+docker:
+  image:
+    repository: docker
+    # Image pull policy - IfNotPresent, Always, or Never
+    pullPolicy: IfNotPresent
+    tag: "dind"
+  ## the driver is fuse-overlayfs o overlay2. 
+  docker_storage_driver: "overlay2"
+  replicaCount: "1"
+  cpu: "1"
+  cpu_limit: "2"
+  cores: 1
+  request_memory: "1Gi"
+  memory_limit: "10Gi"
+  storage_request: "25Gi"
+  storage_limit: "25Gi"
+
+volumes:
+  storage_sizelimit: "25Gi"
+  docker_socket_size_limit: "1Mi"
+  agent_work_size_limit: "6Gi"
+  agent_externals_size_limit: "1Gi"
+  agent_tool_size_limit: "500Mi"
+  kube_config_shared_size_limit: "500Mi"
+
+#################################
+########## Keda Values ##########
+#################################
+keda:
+  ## Keda ScaledObject settings -> job or object
+  quota_maxReplicaCount: "160"
+  scaledtype: "object"
+  minReplicaCount: "10"
+  maxReplicaCount: "50"
+  pollingInterval: "30"
+  cooldownPeriod: "120"
+  successfulJobsHistoryLimit: "0"
+  failedJobsHistoryLimit: "1"
+  targetPipelinesQueueLength: "1"
+  activationTargetPipelinesQueueLength: "1"
+  ## Cron triggers for scheduled scaling (list of {timezone,start,end,desiredReplicas}); empty = no cron, does not affect other releases
+  cronTriggers: []
+  scalingStrategy: "default"
+  #scalingStrategy: "accurate" # simple or accurate or default
+  ttlSecondsAfterFinished: "30"
+  backoffLimit: "0"
+  ## SCALED UP
+  scaleUpStabilizationWindowSeconds: "0"
+  scaleUpStabilizationWindowSecondsPolicyType: "Pods"
+  scaleUpStabilizationWindowSecondsPolicyValue: "50"
+  scaleUpStabilizationWindowSecondsPeriod: "30"
+  ## SCALED UP 2
+  scaleUpStabilizationWindowSecondsPolicyType2: "Percent"
+  scaleUpStabilizationWindowSecondsPolicyValue2: "400"
+  scaleUpStabilizationWindowSecondsPeriod2: "30"
+  ## SCALED DOWN
+  scaleDownStabilizationWindowSeconds: "240"
+  scaleDownStabilizationWindowSecondsPolicyType: "Percent"
+  scaleDownStabilizationWindowSecondsPolicyValue: "50"
+  scaleDownStabilizationWindowSecondsPeriod: "120"
+
+
+ # If true, the parent field is added to the ScaledJob so agents register with that parent and can be easily cleaned up. If false, the parent field is not added, and agents register without a parent.
+  parent: "false" 
+  dnspolicy: 
+    active: "true"
+    ndots: "1"
+    timeout: "5"
+    attempts: "3"
+
+serviceAccount:
+  create: false
+
+rbac:
+  create: false
