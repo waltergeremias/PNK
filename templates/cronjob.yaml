@@ -1,0 +1,29 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Values.pnk.agent_name }}-{{ .Release.Name }}-cleaning-job
+  namespace: {{ .Release.Namespace }}
+spec:
+  schedule: '*/15 * * * *' # every 30 minute
+  successfulJobsHistoryLimit: 0
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: busybox
+              image: {{ .Values.pnk.cronjob_image }}
+              command: ["/bin/bash","-c", "/home/cleaning-task.sh"]
+              volumeMounts:
+                - name: azdevops-config
+                  mountPath: /home/cleaning-task.sh
+                  subPath: cleaning-task.sh
+
+          volumes:
+            - name: azdevops-config
+              configMap:
+                name: {{ .Values.pnk.agent_name }}-{{ .Release.Name }}-cleaning-cfg
+                defaultMode: 448
+          restartPolicy: OnFailure
