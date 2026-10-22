@@ -1,0 +1,249 @@
+{{- if .Values.keda.scaledtype | eq "object" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.pnk.agent_name }}-{{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  #replicas: {{ .Values.agent.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Values.pnk.agent_name }}-{{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.pnk.agent_name }}-{{ .Release.Name }}
+    spec:
+      {{- if eq .Values.keda.dnspolicy.active "true" }}
+      dnsConfig:
+        options:
+          - name: ndots
+            value: {{ .Values.keda.dnspolicy.ndots | quote }}
+          - name: single-request-reopen
+            value: ""
+          - name: timeout
+            value: {{ .Values.keda.dnspolicy.timeout | quote }}
+          - name: attempts
+            value: {{ .Values.keda.dnspolicy.attempts | quote }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.pnk.terminationGracePeriodSeconds }}
+      priorityClassName: {{ .Release.Name }}-high
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        supplementalGroups:
+          - 1000
+      volumes:
+        - name: docker-socket
+          emptyDir:
+            sizeLimit: {{ .Values.volumes.docker_socket_size_limit | default "1Mi" }}
+        - name: permissions
+          emptyDir: {}
+        - name: docker-storage
+          emptyDir:
+            sizeLimit: {{ .Values.volumes.storage_sizelimit }}
+        - name: agent-work
+          emptyDir:
+            medium: Memory 
+            sizeLimit: {{ .Values.volumes.agent_work_size_limit | default "8Gi" }}
+        - name: agent-externals
+          emptyDir: 
+            sizeLimit: {{ .Values.volumes.agent_externals_size_limit | default "2Gi" }}
+        - name: kube-config-shared
+          emptyDir: 
+            sizeLimit: {{ .Values.volumes.kube_config_shared_size_limit | default "500Mi" }}
+        - hostPath:
+            path: /usr/share/zoneinfo/Europe/Madrid
+            type: File
+          name: tz-mad
+        - name: scripts-pnk
+          configMap:
+            name: {{ .Values.pnk.agent_name }}-{{ .Release.Name }}-scripts
+            defaultMode: 0755
+      containers:
+        - name: agent
+          image: {{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag | default .Chart.AppVersion }}
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          securityContext:
+            runAsUser: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "/azp/stop_agent.sh"]
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  STATE=$(cat /azp/state 2>/dev/null || true)
+
+                  case "$STATE" in
+                  READY|BUSY)
+                      exit 0
+                      ;;
+                  *)
+                      exit 1
+                      ;;
+                  esac
+
+            failureThreshold: 60
+            timeoutSeconds: 2
+            periodSeconds: 5
+
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  grep -Eq "^READY$|^BUSY$" /azp/state
+
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 1
+
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  STATE=$(cat /azp/state 2>/dev/null || echo UNKNOWN)
+
+                  case "$STATE" in
+                  FAILED|EXITING)
+                      exit 1
+                      ;;
+                  esac
+
+                  pgrep -f start_agent.sh >/dev/null
+
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+ 
+          env:
+            - name: TZ
+              value: {{ .Values.pnk.timezone | quote }}
+            - name: KUBECONFIG
+              value: /home/vsts_azpcontainer/.kube/config
+            - name: DOCKER_HOST
+              value: "unix:///var/run/docker.sock"
+            - name: AZP_URL
+              value: {{ .Values.pnk.organization_name | quote }}
+            - name: AZP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: keda-azdo-secret-{{ .Release.Name }}
+                  key: personalAccessToken
+            - name: AZP_POOL
+              value: {{ .Values.pnk.azure_pool | quote }}
+            - name: AZP_AGENT_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          command: ["sh", "-c", "/azp/start_agent.sh"]
+          volumeMounts:
+            - name: docker-socket
+              mountPath: /var/run
+            - name: permissions
+              mountPath: /azp/permissions
+            - name: agent-work
+              mountPath: /azp/_work
+            - name: agent-externals
+              mountPath: /azp/externals
+            - mountPath: /etc/localtime
+              name: tz-mad
+              readOnly: true
+            - name: kube-config-shared
+              mountPath: /home/vsts_azpcontainer/.kube
+            - name: scripts-pnk
+              mountPath: /azp/start_agent.sh
+              subPath: start_agent.sh
+            - name: scripts-pnk
+              mountPath: /azp/stop_agent.sh
+              subPath: stop_agent.sh
+            - name: scripts-pnk
+              mountPath: /azp/monitor_job.sh
+              subPath: monitor_job.sh
+            - name: scripts-pnk
+              mountPath: /azp/azdo.sh
+              subPath: azdo.sh
+            - name: scripts-pnk
+              mountPath: /azp/common.sh
+              subPath: common.sh
+
+          resources:
+            requests:
+              memory: {{ .Values.agent.request_memory | quote }}
+              cpu: {{ .Values.agent.cpu | quote }}
+            limits:
+              memory: {{ .Values.agent.memory_limit | quote }}
+              cpu: {{ .Values.agent.cpu_limit | quote }}
+
+        # ===========================
+        # SIDECAR DOCKER — privileged
+        # ===========================
+        - name: docker-daemon
+          image: {{ .Values.docker.image.repository }}:{{ .Values.docker.image.tag  }}
+          imagePullPolicy: {{ .Values.docker.image.pullPolicy }}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 1000
+          command: ["sh", "-c", "/azp/start_docker.sh"]
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  docker info >/dev/null 2>&1
+
+            periodSeconds: 5
+            failureThreshold: 30
+            successThreshold: 1
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: docker-socket
+              mountPath: /var/run
+            - name: docker-storage
+              mountPath: /var/lib/docker
+            - name: agent-work
+              mountPath: /azp/_work
+            - name: agent-externals
+              mountPath: /azp/externals
+            - name: permissions
+              mountPath: /azp/permissions
+            - mountPath: /etc/localtime
+              name: tz-mad
+              readOnly: true
+            - name: kube-config-shared
+              mountPath: /home/vsts_azpcontainer/.kube
+            - name: scripts-pnk
+              mountPath: /azp/start_docker.sh
+              subPath: start_docker.sh
+            - name: scripts-pnk
+              mountPath: /azp/azdo.sh
+              subPath: azdo.sh
+            - name: scripts-pnk
+              mountPath: /azp/common.sh
+              subPath: common.sh
+
+          resources:
+            requests:
+              memory: {{ .Values.docker.request_memory | quote }}
+              cpu: {{ .Values.docker.cpu | quote }}
+              ephemeral-storage: {{ .Values.docker.storage_request | quote }}
+            limits:
+              memory: {{ .Values.docker.memory_limit | quote }}
+              cpu: {{ .Values.docker.cpu_limit | quote }}
+              ephemeral-storage: {{ .Values.docker.storage_limit | quote }}
+{{- end -}}
